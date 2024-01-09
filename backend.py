@@ -1,4 +1,3 @@
-# Import necessary libraries
 import fastapi
 from fastapi.responses import HTMLResponse,RedirectResponse
 from pydantic import BaseModel
@@ -9,8 +8,9 @@ from fastapi.templating import Jinja2Templates
 import os
 from dotenv import load_dotenv
 from passlib.context import CryptContext
-
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import HTMLResponse
+
 
 #Load environment variables from a .env file
 load_dotenv()
@@ -18,7 +18,16 @@ load_dotenv()
 
 #Creates a FastAPI app instance
 app = FastAPI()
-
+ 
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("secret_key"))
+@app.middleware("http")
+async def add_header(request: Request, call_next):
+    response = await call_next(request)
+    if "text/html" in response.headers.get("content-type", "").lower():
+        response.headers["cache-control"] = "no-cache, no-store, must-revalidate"
+        response.headers["expires"] = "0"
+        response.headers["pragma"] = "no-cache"
+    return response
 # Creating an instance of CryptContext for password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -86,7 +95,6 @@ class Signup(BaseModel):
 create=0
 delete=0
 update=0
-login=0
 mail=""
 Role=""
 
@@ -94,12 +102,18 @@ Role=""
 @app.post("/todo_list")
 def add_task(request:Request,date:str=Form(...),description:str=Form(...),deadline:str=Form(...),status:str=Form(...)):
     try:
-        global create
-        data=Task(task_date=date,task_description=description,task_deadline=deadline,task_status=status,email=mail)
-        #To store the date, time, description and status in mongodb
-        task_record= collection.insert_one(dict(data))
-        create=1
-        return RedirectResponse("/todo_list",status_code=303)
+        is_authenticated = request.session.get("is_authenticated")
+        # Check if the user is logged in
+        # if login==0:
+        if  is_authenticated:
+            global create
+            data=Task(task_date=date,task_description=description,task_deadline=deadline,task_status=status,email=mail)
+            #To store the date, time, description and status in mongodb
+            task_record= collection.insert_one(dict(data))
+            create=1
+            return RedirectResponse("/todo_list",status_code=303)
+        else:
+            return RedirectResponse("/login", status_code=303)
     except Exception as e:
         return e
     
@@ -110,10 +124,11 @@ def display(request: Request):
         global create
         global delete
         global update
-        global login
         global Role
+        is_authenticated = request.session.get("is_authenticated")
         # Check if the user is logged in
-        if login==0:
+        # if login==0:
+        if  is_authenticated:
             data= collection.find({"email": mail})#get the data with the provided email
             all_data=list(data)
             admindata = collection.find()
@@ -203,19 +218,19 @@ def post_signup(request: Request, name: str = Form(...), email: str = Form(...),
 @app.post("/login", response_class=HTMLResponse)
 def verify_user(request: Request, email: str = Form(...), password: str = Form(...)):
     global mail
-    global login
     global Role
     try:
         user= authenticate_user(email,password)
         existing_user = collection1.find_one({"Email": email})
          # Check if the provided email and password match a user in the signup collection
         if user:
-            login=0
+            # login=0
+            # request.session["email"]= user["email"]
+            request.session["is_authenticated"] = True
             mail=email
             Role=existing_user['role']
             return RedirectResponse("/todo_list", status_code=303)
         else:
-            login=1
             return templates.TemplateResponse("login.html",{"request": request, "message":"Invalid Email or Password!"})
     except Exception:
         raise Exception(status_code=500, detail="Internal Server Error")
@@ -224,10 +239,33 @@ def verify_user(request: Request, email: str = Form(...), password: str = Form(.
 #POST request to logout from the task page
 @app.post("/logout",response_class=HTMLResponse)
 def logout(request:Request):
-    global login
-    login=1
+    request.session.clear()
     return RedirectResponse("/login",status_code=303)
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin(request: Request):
     return templates.TemplateResponse("admin.html", {"request": request})
+    
+
+@app.post("/delete", response_class=HTMLResponse)
+def delete(request: Request, date: str = Form(...), description: str = Form(...), status: str = Form(...)):
+    try:
+        global delete
+        # Retrieve the task to check the status
+        task = collection.find_one({"task_date": date, "task_description": description, "task_status": status})
+
+        # Check if the task status is "completed" before allowing deletion
+        if task and task["task_status"] == "completed":
+            # Delete the time, date, description, and status related to the logged-in person
+            delete_data = collection.delete_one({"task_date": date, "task_description": description, "task_status": status})
+            delete = 1
+            return RedirectResponse("/admin.html", status_code=303)
+        else:
+            # Provide an alternative response for non-completed tasks
+            return HTMLResponse(content="Cannot delete. Task is not completed.", status_code=400)
+
+    except Exception as e:
+        return e
+
+
+    
